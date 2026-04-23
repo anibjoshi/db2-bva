@@ -183,10 +183,13 @@ export function BvaForm() {
           })),
       };
       const result = await generateDeck(payload);
+      const customerSlug = form.customer_name.trim().replace(/\s+/g, '_');
+      const dateSlug = form.report_date.trim().replace(/[\s,]+/g, '_');
+      const filename = `${customerSlug}_Db2AIEdition_Proposal_${dateSlug}.pptx`;
       const url = URL.createObjectURL(result.blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${form.customer_name.trim().replace(/\s+/g, '_')}_BVA.pptx`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -194,7 +197,7 @@ export function BvaForm() {
       if (result.warnings.length > 0) {
         setWarnings(result.warnings);
       } else {
-        setSuccess(`${form.customer_name.trim()}_BVA.pptx downloaded`);
+        setSuccess(`${filename} downloaded`);
         setTimeout(() => setSuccess(null), 5000);
       }
     } catch (err) {
@@ -218,7 +221,7 @@ export function BvaForm() {
       <div className="bva-header">
         <div>
           <p className="bva-eyebrow">IBM Db2 Genius Hub</p>
-          <h1>Business Value Assessment</h1>
+          <h1>Db2 AI Edition Proposal Generator</h1>
           <p className="bva-subtitle">
             Generate a customized BVA deck for your customer. Fields marked * are required.
           </p>

@@ -118,12 +118,31 @@ def update_slide_05(slide, inputs: BvaRequest):
     title_runs = slide.shapes[1].text_frame.paragraphs[0].runs
     title_runs[0].text = title_runs[0].text.replace("Cigna", inputs.customer_name)
 
-    # No line items: leave placeholder tables as-is.
+    # --- Align the two tables horizontally ---
+    # Same left edge + total width; Table 1's 3 cols span Table 2's 5 cols as
+    # (cols 0+1 | col 2 | cols 3+4) so the column dividers line up visually.
+    deal_shape = slide.shapes[2]
+    line_shape = slide.shapes[3]
+    deal_shape.left = line_shape.left
+    deal_shape.width = line_shape.width
+
+    line_grid_cols = line_shape.table._tbl.find(qn("a:tblGrid")).findall(qn("a:gridCol"))
+    line_widths = [int(gc.get("w")) for gc in line_grid_cols]
+    deal_col_widths = [
+        line_widths[0] + line_widths[1],
+        line_widths[2],
+        line_widths[3] + line_widths[4],
+    ]
+    deal_grid_cols = deal_shape.table._tbl.find(qn("a:tblGrid")).findall(qn("a:gridCol"))
+    for gc, w in zip(deal_grid_cols, deal_col_widths):
+        gc.set("w", str(w))
+
+    # No line items: leave placeholder tables as-is (only alignment applied).
     if not inputs.trade_up_items:
         return
 
     # --- Deal-level table (shape 2): Current S&S | Support Due | Notes ---
-    deal_table = slide.shapes[2].table
+    deal_table = deal_shape.table
     _set_cell_text(deal_table.cell(1, 0), fmt_currency_full(inputs.current_s_and_s_total))
     _set_cell_text(deal_table.cell(1, 1), inputs.renewal_date.strip())
 
@@ -152,6 +171,12 @@ def update_slide_05(slide, inputs: BvaRequest):
         _set_cell_lines(li_table.cell(r, 2), (calc.target, calc.pn))
         _set_cell_text(li_table.cell(r, 3), str(item.source_quantity))
         _set_cell_text(li_table.cell(r, 4), fmt_currency_full(calc.year1_total))
+
+        # Qty cell is empty in the template, so its run inherits no explicit
+        # font size. Match the Price column (24pt IBM Plex Sans Text).
+        qty_run = li_table.cell(r, 3).text_frame.paragraphs[0].runs[0]
+        qty_run.font.size = Pt(24)
+        qty_run.font.name = "IBM Plex Sans Text"
 
 
 # ---------------------------------------------------------------------------

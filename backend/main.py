@@ -1,4 +1,5 @@
 import json
+import re
 from io import BytesIO
 from pathlib import Path
 
@@ -48,7 +49,9 @@ async def trade_up_catalog():
 async def generate(request: BvaRequest):
     calcs = calculate(request)
     pptx_bytes = generate_pptx(request, calcs)
-    filename = f"{request.customer_name.replace(' ', '_')}_BVA.pptx"
+    customer_slug = request.customer_name.replace(" ", "_")
+    date_slug = re.sub(r"[\s,]+", "_", request.report_date.strip())
+    filename = f"{customer_slug}_Db2AIEdition_Proposal_{date_slug}.pptx"
 
     warnings = _build_warnings(calcs)
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
