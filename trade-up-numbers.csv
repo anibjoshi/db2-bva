@@ -1,0 +1,8 @@
+﻿From,To,Tradeup PN,Ratio,List price,License Cost,S&S 
+Db2 Advanced Edition VPC,Db2 AI Advanced Edition VPC,D14TCZX,1,"$35,100 ","$15,200 ","$19,900 "
+Db2 Warehouse VPC,Db2 AI Advanced Edition VPC,D14TBZX,1,"$93,000 ","$73,100 ","$19,900 "
+Db2 Advanced Edition AU,Db2 AI Advanced Edition AU,D14TFZX,1,"$1,510 ",$654 ,$856 
+Db2 Advanced Enterprise Server Edition PVU,Db2 AI Advanced Edition VPC,D15DHZX,0.014285714,"$34,100 ","$14,200 ","$19,900 "
+Db2 Enterprise Server Edition PVU,Db2 AI Advanced Edition VPC,D15DGZX,0.014285714,"$59,300 ","$39,400 ","$19,900 "
+Db2 Standard Edition VPC,Db2 AI Standard Edition VPC,D14P2ZX,1,"$11,700 ","$6,600 ","$5,100 "
+Db2 Standard Edition AU,Db2 AI Standard Edition AU,D14P0ZX,1,$887 ,$501 ,$386 

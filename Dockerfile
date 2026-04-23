@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 
 # Copy PPTX template alongside Python files
-COPY Db2GeniusHub_BVA.pptx ./
+COPY Db2GeniusHub_Proposal.pptx ./
 
 # Copy built frontend into static/
 COPY --from=frontend /app/dist ./static

@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from calculator import calculate
 from models import BvaRequest
 from pptx_generator import generate_pptx
+from trade_up_catalog import list_sources
 
 app = FastAPI(title="BVA Deck Generator")
 
@@ -36,6 +37,11 @@ def _build_warnings(calcs) -> list[str]:
             "Negative NPV — the deal does not pay back within 3 years at the current discount rate."
         )
     return warnings
+
+
+@app.get("/api/trade-up-catalog")
+async def trade_up_catalog():
+    return list_sources()
 
 
 @app.post("/api/generate")

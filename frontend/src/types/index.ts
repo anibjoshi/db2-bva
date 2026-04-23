@@ -1,3 +1,15 @@
+export interface TradeUpCatalogEntry {
+  source: string;
+  target: string;
+  pn: string;
+}
+
+export interface TradeUpItem {
+  source_product: string;
+  source_quantity: number | '';
+  discount_pct: number;   // UI: 0–100
+}
+
 export interface BvaFormData {
   seller_name: string;
   seller_email: string;
@@ -19,16 +31,17 @@ export interface BvaFormData {
   // Tool Consolidation
   num_tools: number;
   cost_per_tool: number;
-  // Investment — Software License
-  sw_yr1: number;
-  sw_yr2: number;
-  sw_yr3: number;
-  // Investment — Hardware
+  // Investment — Hardware (software cost comes from trade-ups)
   hw_yr1: number;
   hw_yr2: number;
   hw_yr3: number;
   // Financial
   discount_rate: number;      // UI: 0–100
+  // Trade-up (deal-level)
+  current_s_and_s_total: number | '';
+  renewal_date: string;
+  trade_up_notes: string;
+  trade_up_items: TradeUpItem[];
 }
 
 export interface BvaApiPayload {
@@ -46,8 +59,16 @@ export interface BvaApiPayload {
   sev1_reduction_pct: number; // API: 0–1
   num_tools: number;
   cost_per_tool: number;
-  invest_yr1: number;
-  invest_yr2: number;
-  invest_yr3: number;
+  hw_yr1: number;
+  hw_yr2: number;
+  hw_yr3: number;
   discount_rate: number;      // API: 0–1
+  current_s_and_s_total: number;
+  renewal_date: string;
+  trade_up_notes: string;
+  trade_up_items: {
+    source_product: string;
+    source_quantity: number;
+    discount_pct: number;      // API: 0–1
+  }[];
 }

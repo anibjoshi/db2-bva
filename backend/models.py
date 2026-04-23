@@ -4,6 +4,12 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+class TradeUpItem(BaseModel):
+    source_product: str = Field(..., min_length=1)
+    source_quantity: int = Field(..., ge=1)
+    discount_pct: float = Field(default=0.0, ge=0, le=1)
+
+
 class BvaRequest(BaseModel):
     # Required
     customer_name: str = Field(..., min_length=1)
@@ -11,6 +17,12 @@ class BvaRequest(BaseModel):
     # Auto-filled
     report_date: str = Field(default_factory=lambda: datetime.now().strftime("%B %Y"))
     discount_rate: float = Field(default=0.10, ge=0, le=1)
+
+    # Trade-up line items (optional)
+    trade_up_items: list[TradeUpItem] = Field(default_factory=list)
+    current_s_and_s_total: float = Field(default=0.0, ge=0)  # deal-level; display only
+    renewal_date: str = Field(default="")                     # deal-level; free-form e.g. "August 2026"
+    trade_up_notes: str = Field(default="")                   # deal-level; optional seller note
 
     # DBA Productivity
     num_dbas: int = Field(default=20, ge=0)
@@ -32,10 +44,10 @@ class BvaRequest(BaseModel):
     num_tools: int = Field(default=4, ge=0)
     cost_per_tool: float = Field(default=25000, ge=0)
 
-    # Investment (optional)
-    invest_yr1: float = Field(default=0, ge=0)
-    invest_yr2: float = Field(default=0, ge=0)
-    invest_yr3: float = Field(default=0, ge=0)
+    # Hardware investment (software cost is derived from trade_up_items)
+    hw_yr1: float = Field(default=0, ge=0)
+    hw_yr2: float = Field(default=0, ge=0)
+    hw_yr3: float = Field(default=0, ge=0)
 
 
 @dataclass

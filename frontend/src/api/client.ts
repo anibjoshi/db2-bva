@@ -1,9 +1,17 @@
+import type { TradeUpCatalogEntry } from '../types';
+
 // ?? (not ||) so empty string from Docker build is respected as same-origin
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 
 export interface GenerateResult {
   blob: Blob;
   warnings: string[];
+}
+
+export async function fetchTradeUpCatalog(): Promise<TradeUpCatalogEntry[]> {
+  const response = await fetch(`${API_BASE_URL}/api/trade-up-catalog`);
+  if (!response.ok) throw new Error('Failed to load trade-up catalog');
+  return response.json();
 }
 
 export async function generateDeck(payload: Record<string, unknown>): Promise<GenerateResult> {

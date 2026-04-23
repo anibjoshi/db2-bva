@@ -1,4 +1,5 @@
 from models import BvaCalculations, BvaRequest
+from trade_up_catalog import calculate_line_item
 
 # Benefit realization ramp — internal methodology constant (Forrester TEI standard)
 # Not exposed as user input; represents adoption maturity over 3 years
@@ -44,11 +45,24 @@ def calculate(inputs: BvaRequest) -> BvaCalculations:
     total_3yr_benefits = benefit_yr1 + benefit_yr2 + benefit_yr3
 
     # --- Financial KPIs ---
-    total_investment = inputs.invest_yr1 + inputs.invest_yr2 + inputs.invest_yr3
+    # Software investment comes from trade-up items (year 1 = license, year 2+ = S&S renewal)
+    trade_up_yr1 = sum(
+        calculate_line_item(item.source_product, item.source_quantity, item.discount_pct).year1_total
+        for item in inputs.trade_up_items
+    )
+    trade_up_annual = sum(
+        calculate_line_item(item.source_product, item.source_quantity, item.discount_pct).annual_after_yr1
+        for item in inputs.trade_up_items
+    )
 
-    net_yr1 = benefit_yr1 - inputs.invest_yr1
-    net_yr2 = benefit_yr2 - inputs.invest_yr2
-    net_yr3 = benefit_yr3 - inputs.invest_yr3
+    invest_yr1 = inputs.hw_yr1 + trade_up_yr1
+    invest_yr2 = inputs.hw_yr2 + trade_up_annual
+    invest_yr3 = inputs.hw_yr3 + trade_up_annual
+    total_investment = invest_yr1 + invest_yr2 + invest_yr3
+
+    net_yr1 = benefit_yr1 - invest_yr1
+    net_yr2 = benefit_yr2 - invest_yr2
+    net_yr3 = benefit_yr3 - invest_yr3
     net_total = net_yr1 + net_yr2 + net_yr3
 
     if total_investment == 0:
@@ -64,7 +78,7 @@ def calculate(inputs: BvaRequest) -> BvaCalculations:
     # show a negative number (that would imply delay is beneficial).
     cost_of_delay_3mo = max(npv / 12, 0.0)
 
-    if total_investment == 0 or benefit_yr1 >= inputs.invest_yr1:
+    if total_investment == 0 or benefit_yr1 >= invest_yr1:
         payback_period = "Immediate"
     else:
         # Quarter-by-quarter cumulative net benefit
@@ -74,12 +88,12 @@ def calculate(inputs: BvaRequest) -> BvaCalculations:
             benefit_yr3 / 4, benefit_yr3 / 4, benefit_yr3 / 4, benefit_yr3 / 4,
         ]
         quarterly_investment = [
-            inputs.invest_yr1 / 4, inputs.invest_yr1 / 4,
-            inputs.invest_yr1 / 4, inputs.invest_yr1 / 4,
-            inputs.invest_yr2 / 4, inputs.invest_yr2 / 4,
-            inputs.invest_yr2 / 4, inputs.invest_yr2 / 4,
-            inputs.invest_yr3 / 4, inputs.invest_yr3 / 4,
-            inputs.invest_yr3 / 4, inputs.invest_yr3 / 4,
+            invest_yr1 / 4, invest_yr1 / 4,
+            invest_yr1 / 4, invest_yr1 / 4,
+            invest_yr2 / 4, invest_yr2 / 4,
+            invest_yr2 / 4, invest_yr2 / 4,
+            invest_yr3 / 4, invest_yr3 / 4,
+            invest_yr3 / 4, invest_yr3 / 4,
         ]
         cumulative = 0.0
         payback_period = ">3 years"
