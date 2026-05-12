@@ -169,7 +169,8 @@ def update_slide_05(slide, inputs: BvaRequest):
         _set_cell_text(li_table.cell(r, 0), str(r))
         _set_cell_text(li_table.cell(r, 1), calc.source)
         _set_cell_lines(li_table.cell(r, 2), (calc.target, calc.pn))
-        _set_cell_text(li_table.cell(r, 3), str(item.source_quantity))
+        # Qty column sits next to the AI Edition, so show destination-unit count.
+        _set_cell_text(li_table.cell(r, 3), f"{calc.destination_quantity:,}")
         _set_cell_text(li_table.cell(r, 4), fmt_currency_full(calc.year1_total))
 
         # Qty cell is empty in the template, so its run inherits no explicit

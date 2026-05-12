@@ -24,6 +24,12 @@ app.add_middleware(
 )
 
 
+# If 3-year benefits are below this fraction of total investment, flag the
+# deal as likely-misconfigured. Tuned to catch the common "huge trade-up
+# size, default benefit inputs" pattern that sellers fall into.
+BENEFITS_TO_INVESTMENT_WARNING_RATIO = 0.25
+
+
 def _build_warnings(calcs) -> list[str]:
     warnings = []
     if calcs.roi_pct < 0:
@@ -36,6 +42,12 @@ def _build_warnings(calcs) -> list[str]:
     if calcs.npv < 0:
         warnings.append(
             "Negative NPV — the deal does not pay back within 3 years at the current discount rate."
+        )
+    if calcs.total_investment > 0 and calcs.total_3yr_benefits < BENEFITS_TO_INVESTMENT_WARNING_RATIO * calcs.total_investment:
+        warnings.append(
+            "Projected benefits appear small relative to the trade-up investment. "
+            "Revisit the benefit inputs — number of DBAs, incidents per year, SEV-1 count, "
+            "tools, etc. — to make sure they reflect the scale of the customer's Db2 footprint."
         )
     return warnings
 

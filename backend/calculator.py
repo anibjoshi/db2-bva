@@ -45,19 +45,23 @@ def calculate(inputs: BvaRequest) -> BvaCalculations:
     total_3yr_benefits = benefit_yr1 + benefit_yr2 + benefit_yr3
 
     # --- Financial KPIs ---
-    # Software investment comes from trade-up items (year 1 = license, year 2+ = S&S renewal)
+    # Software investment comes from trade-up items:
+    #   Year 1   = license purchase (one-time)
+    #   Year 2+  = new S&S, but customer was already paying current S&S on the
+    #             existing licenses — so only the INCREMENTAL delta counts.
     trade_up_yr1 = sum(
         calculate_line_item(item.source_product, item.source_quantity, item.discount_pct).year1_total
         for item in inputs.trade_up_items
     )
-    trade_up_annual = sum(
+    trade_up_annual_new = sum(
         calculate_line_item(item.source_product, item.source_quantity, item.discount_pct).annual_after_yr1
         for item in inputs.trade_up_items
     )
+    incremental_s_and_s = max(0.0, trade_up_annual_new - inputs.current_s_and_s_total)
 
     invest_yr1 = inputs.hw_yr1 + trade_up_yr1
-    invest_yr2 = inputs.hw_yr2 + trade_up_annual
-    invest_yr3 = inputs.hw_yr3 + trade_up_annual
+    invest_yr2 = inputs.hw_yr2 + incremental_s_and_s
+    invest_yr3 = inputs.hw_yr3 + incremental_s_and_s
     total_investment = invest_yr1 + invest_yr2 + invest_yr3
 
     net_yr1 = benefit_yr1 - invest_yr1

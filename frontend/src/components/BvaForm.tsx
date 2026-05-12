@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   Tile,
   TextInput,
@@ -11,9 +11,77 @@ import {
   InlineNotification,
   InlineLoading,
 } from '@carbon/react';
-import { Download, Reset, Add, TrashCan, ArrowUp } from '@carbon/icons-react';
+import { Download, Reset, Add, TrashCan } from '@carbon/icons-react';
 import { generateDeck, fetchTradeUpCatalog } from '../api/client';
 import type { BvaFormData, TradeUpCatalogEntry, TradeUpItem } from '../types';
+
+type ScaledFields = {
+  num_dbas: number;
+  incidents_per_year: number;
+  sev1_per_year: number;
+  num_tools: number;
+};
+
+// Annual Software Subscription & Support, as a fraction of the (discounted)
+// license cost. Must match S_AND_S_RATE in backend/trade_up_catalog.py.
+const S_AND_S_RATE = 0.20;
+
+// Deployment-size → benefit-default scaling rules. Sub-linear power-law
+// (and log for tools) curves were tuned so a 1,000-VPC deployment lands on
+// industry-typical midpoints, and an obviously-junk size (e.g. 400K VPCs)
+// produces clearly-larger suggested defaults than the static starting point —
+// which is the signal sellers were missing before auto-scale existed.
+const SCALE = {
+  // num_dbas = max(floor, round(size^exp)) — automation lets a single DBA
+  // cover more servers as scale grows. (1k VPC → 23, 10k → 63, 100k → 178)
+  DBAS_EXPONENT: 0.45,
+  DBAS_FLOOR: 5,
+
+  // incidents_per_year = max(floor, round(size^exp)) — ServiceNow ticket
+  // volume grows faster than headcount but still sub-linearly.
+  // (1k VPC → 126, 10k → 631, 100k → 3,162)
+  INCIDENTS_EXPONENT: 0.7,
+  INCIDENTS_FLOOR: 15,
+
+  // sev1_per_year = max(floor, round(mult × size^exp)) — SEV-1s track DBA
+  // count since they scale with the operational footprint.
+  // (1k VPC → 9, 10k → 25, 100k → 71)
+  SEV1_EXPONENT: 0.45,
+  SEV1_MULTIPLIER: 0.4,
+  SEV1_FLOOR: 2,
+
+  // num_tools = clamp(round(intercept + log10(size)), floor, ceiling) —
+  // New Relic 2025 (n=1,700) shows ~4 tools/org with very little variance
+  // by deployment size; we plateau between 2 and 10.
+  TOOLS_INTERCEPT: 3,
+  TOOLS_FLOOR: 2,
+  TOOLS_CEILING: 10,
+} as const;
+
+function formatBigCurrency(value: number): string {
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `$${Math.round(value / 1_000).toLocaleString()}K`;
+  return `$${Math.round(value).toLocaleString()}`;
+}
+
+function deriveScaledDefaults(deploymentSize: number): ScaledFields {
+  const size = Math.max(1, deploymentSize);
+  return {
+    num_dbas: Math.max(SCALE.DBAS_FLOOR, Math.round(Math.pow(size, SCALE.DBAS_EXPONENT))),
+    incidents_per_year: Math.max(
+      SCALE.INCIDENTS_FLOOR,
+      Math.round(Math.pow(size, SCALE.INCIDENTS_EXPONENT)),
+    ),
+    sev1_per_year: Math.max(
+      SCALE.SEV1_FLOOR,
+      Math.round(SCALE.SEV1_MULTIPLIER * Math.pow(size, SCALE.SEV1_EXPONENT)),
+    ),
+    num_tools: Math.max(
+      SCALE.TOOLS_FLOOR,
+      Math.min(SCALE.TOOLS_CEILING, Math.round(SCALE.TOOLS_INTERCEPT + Math.log10(size))),
+    ),
+  };
+}
 
 const DEFAULTS: BvaFormData = {
   seller_name: '',
@@ -23,15 +91,15 @@ const DEFAULTS: BvaFormData = {
   num_dbas: 20,
   dba_annual_pay: 180000,
   dba_ops_pct: 85,
-  ops_reduction_pct: 30,
+  ops_reduction_pct: 40,
   incidents_per_year: '',
-  cost_per_incident: 50000,
-  mttr_reduction_pct: 30,
+  cost_per_incident: 75000,
+  mttr_reduction_pct: 50,
   sev1_per_year: '',
-  cost_per_sev1: 250000,
+  cost_per_sev1: 500000,
   sev1_reduction_pct: 50,
   num_tools: 4,
-  cost_per_tool: 25000,
+  cost_per_tool: 75000,
   hw_yr1: 0,
   hw_yr2: 0,
   hw_yr3: 0,
@@ -51,6 +119,80 @@ export function BvaForm() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [catalog, setCatalog] = useState<TradeUpCatalogEntry[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
+
+  // Tracks the last auto-applied scaled values so we can tell whether a field
+  // is still "pristine" (matches what we last filled in) vs. user-edited.
+  // Pristine fields get refreshed when deployment size changes; edited ones don't.
+  const lastScaledRef = useRef<ScaledFields>({
+    num_dbas: DEFAULTS.num_dbas,
+    incidents_per_year: 0,
+    sev1_per_year: 0,
+    num_tools: DEFAULTS.num_tools,
+  });
+
+  // Sum in VPC-equivalents: 70 PVU = 1 VPC, AU and VPC stay 1:1. Falls back
+  // to ratio=1 if catalog hasn't loaded yet (rare race; recomputes on load).
+  const totalDeploymentSize = useMemo(() => {
+    const ratioBySource = new Map(catalog.map(c => [c.source, c.ratio]));
+    return form.trade_up_items.reduce((sum, it) => {
+      const qty = Number(it.source_quantity) || 0;
+      if (qty <= 0) return sum;
+      const ratio = ratioBySource.get(it.source_product) ?? 1;
+      return sum + qty * ratio;
+    }, 0);
+  }, [form.trade_up_items, catalog]);
+
+  // Mirror the backend's investment math so sellers see, live, what ROI is
+  // calculated against — not just the eye-catching Yr1 license number.
+  // Annual S&S = S_AND_S_RATE × discounted license (standard IBM maintenance).
+  const investmentPreview = useMemo(() => {
+    const bySource = new Map(catalog.map(c => [c.source, c]));
+    let yr1License = 0;
+    for (const item of form.trade_up_items) {
+      const entry = bySource.get(item.source_product);
+      const qty = Number(item.source_quantity) || 0;
+      if (!entry || qty <= 0) continue;
+      const destQty = Math.ceil(qty * entry.ratio);
+      const discountMult = 1 - (item.discount_pct / 100);
+      yr1License += destQty * entry.license_cost * discountMult;
+    }
+    const annualNewSandS = yr1License * S_AND_S_RATE;
+    const currentSandS = form.current_s_and_s_total === '' ? 0 : Number(form.current_s_and_s_total);
+    const annualSandSDelta = Math.max(0, annualNewSandS - currentSandS);
+    const hw = (form.hw_yr1 || 0) + (form.hw_yr2 || 0) + (form.hw_yr3 || 0);
+    const total3yr = yr1License + 2 * annualSandSDelta + hw;
+    return { yr1License, annualNewSandS, annualSandSDelta, total3yr, currentSandS };
+  }, [
+    form.trade_up_items,
+    form.current_s_and_s_total,
+    form.hw_yr1,
+    form.hw_yr2,
+    form.hw_yr3,
+    catalog,
+  ]);
+
+  useEffect(() => {
+    if (totalDeploymentSize <= 0) return;
+    const scaled = deriveScaledDefaults(totalDeploymentSize);
+    // Capture BEFORE setForm — React 18 may defer the updater, and we mutate
+    // the ref below. Reading lastScaledRef.current inside the updater would
+    // see the new value and the equality checks would all silently pass through.
+    const last = lastScaledRef.current;
+    setForm(prev => ({
+      ...prev,
+      num_dbas: prev.num_dbas === last.num_dbas ? scaled.num_dbas : prev.num_dbas,
+      incidents_per_year:
+        prev.incidents_per_year === '' || prev.incidents_per_year === last.incidents_per_year
+          ? scaled.incidents_per_year
+          : prev.incidents_per_year,
+      sev1_per_year:
+        prev.sev1_per_year === '' || prev.sev1_per_year === last.sev1_per_year
+          ? scaled.sev1_per_year
+          : prev.sev1_per_year,
+      num_tools: prev.num_tools === last.num_tools ? scaled.num_tools : prev.num_tools,
+    }));
+    lastScaledRef.current = scaled;
+  }, [totalDeploymentSize]);
 
   useEffect(() => {
     fetchTradeUpCatalog()
@@ -136,6 +278,10 @@ export function BvaForm() {
       next.incidents_per_year = 'Required — provide from ServiceNow / PagerDuty';
     if (form.sev1_per_year === '' || form.sev1_per_year === undefined)
       next.sev1_per_year = 'Required — provide from incident management system';
+    if (form.current_s_and_s_total === '' || Number(form.current_s_and_s_total) <= 0)
+      next.current_s_and_s_total = 'Required — current annual S&S total';
+    if (!form.renewal_date.trim())
+      next.renewal_date = 'Required — when is support due?';
     setErrors(next);
     return Object.keys(next).length === 0;
   };
@@ -213,6 +359,12 @@ export function BvaForm() {
     setError(null);
     setSuccess(null);
     setWarnings([]);
+    lastScaledRef.current = {
+      num_dbas: DEFAULTS.num_dbas,
+      incidents_per_year: 0,
+      sev1_per_year: 0,
+      num_tools: DEFAULTS.num_tools,
+    };
   };
 
   return (
@@ -351,59 +503,18 @@ export function BvaForm() {
       {/* ── Trade-up Pricing ── */}
       <Tile style={{ marginBottom: '0.75rem' }}>
         <div className="bva-section-title">Trade-up Pricing</div>
+        <div className="bva-section-explain">
+          A <strong>trade-up</strong> swaps the customer's existing IBM software entitlements for Db2 AI
+          Edition licenses. <strong>S&S</strong> (Software Subscription & Support) is the annual
+          maintenance fee they're already paying on those entitlements.
+        </div>
         <div className="bva-guidance">
-          Enter the customer's current annual S&S and support renewal (applies across all entitlements),
-          then add one row per entitlement being traded up.
+          Add one row per entitlement being traded up. Below the entitlements,
+          enter the customer's current annual S&S total and support renewal date
+          (applies across all entitlements).
         </div>
 
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            gap: '0.75rem',
-            marginBottom: '1rem',
-          }}
-        >
-          <NumberInput
-            id="current_s_and_s_total"
-            label="Current annual S&S total ($) *"
-            value={form.current_s_and_s_total === '' ? ('' as unknown as number) : form.current_s_and_s_total}
-            min={0}
-            step={5000}
-            invalid={form.current_s_and_s_total === '' || Number(form.current_s_and_s_total) <= 0}
-            invalidText="Required"
-            onChange={(_e, data) => {
-              if (data.value === '' || data.value === undefined) {
-                updateField('current_s_and_s_total', '');
-                return;
-              }
-              const v = typeof data.value === 'string' ? parseFloat(data.value) : data.value;
-              updateField('current_s_and_s_total', isNaN(v) ? '' : v);
-            }}
-          />
-          <TextInput
-            id="renewal_date"
-            labelText="Support due *"
-            value={form.renewal_date}
-            placeholder="e.g., August 2026"
-            invalid={!form.renewal_date.trim()}
-            invalidText="Required"
-            onChange={(e) => updateField('renewal_date', e.target.value)}
-          />
-        </div>
-
-        <div style={{ marginBottom: '1rem' }}>
-          <TextArea
-            id="trade_up_notes"
-            labelText="Notes (optional)"
-            value={form.trade_up_notes}
-            placeholder="Add deal specifics or notes if needed"
-            helperText="Shown on slide 5 in the Notes column"
-            rows={3}
-            onChange={(e) => updateField('trade_up_notes', e.target.value)}
-          />
-        </div>
-
+        {/* ── Existing entitlements (line items) ── */}
         {form.trade_up_items.map((item, idx) => (
           <div
             key={idx}
@@ -432,8 +543,6 @@ export function BvaForm() {
               value={item.source_quantity === '' ? ('' as unknown as number) : item.source_quantity}
               min={1}
               step={1}
-              invalid={item.source_quantity === '' || Number(item.source_quantity) <= 0}
-              invalidText="Required"
               onChange={(_e, data) => {
                 const v = typeof data.value === 'string' ? parseInt(data.value) : data.value;
                 updateTradeUpItem(idx, 'source_quantity', isNaN(v) ? '' : v);
@@ -472,12 +581,134 @@ export function BvaForm() {
         >
           Add line item
         </Button>
+
+        {/* ── Live deployment-size banner (derived from entitlements above) ── */}
+        {totalDeploymentSize > 0 && (
+          <div className="bva-guidance" style={{ marginTop: '1rem' }}>
+            <strong>
+              Detected deployment size: ~{Math.max(1, Math.round(totalDeploymentSize)).toLocaleString()} VPC-equivalent
+            </strong>{' '}
+            (PVUs are normalized at 70 PVU = 1 VPC) — defaults for DBAs, incidents,
+            SEV-1s, and tools below auto-scale to this size. Override with
+            customer-specific data when you have it.
+          </div>
+        )}
+
+        {/* ── Live 3-year investment preview ── */}
+        {investmentPreview.total3yr > 0 && (
+          <div className="bva-investment-preview">
+            <div className="bva-investment-header">
+              <strong>Estimated 3-year investment</strong>
+              <span className="bva-investment-total">{formatBigCurrency(investmentPreview.total3yr)}</span>
+            </div>
+            <div className="bva-investment-breakdown">
+              Year 1 license: {formatBigCurrency(investmentPreview.yr1License)}
+              {(form.hw_yr1 || 0) > 0 && <> + HW {formatBigCurrency(form.hw_yr1)}</>}
+              {' · '}
+              Yr 2 + Yr 3 S&S delta: {formatBigCurrency(investmentPreview.annualSandSDelta)}/yr
+              {' '}(new S&S {formatBigCurrency(investmentPreview.annualNewSandS)}/yr =&nbsp;20% of license
+              {' '}vs current {formatBigCurrency(investmentPreview.currentSandS)}/yr)
+              {((form.hw_yr2 || 0) + (form.hw_yr3 || 0)) > 0 && (
+                <> + HW {formatBigCurrency((form.hw_yr2 || 0) + (form.hw_yr3 || 0))}</>
+              )}
+            </div>
+            <div className="bva-investment-note">
+              ROI in your deck is calculated against this 3-year total — not just Year 1 spend.
+            </div>
+          </div>
+        )}
+
+        {/* ── Customer's current state (S&S, support renewal, notes) ── */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: '0.75rem',
+            marginTop: '1.5rem',
+            marginBottom: '1rem',
+          }}
+        >
+          <NumberInput
+            id="current_s_and_s_total"
+            label="Current annual S&S total ($) *"
+            value={form.current_s_and_s_total === '' ? ('' as unknown as number) : form.current_s_and_s_total}
+            min={0}
+            step={5000}
+            invalid={!!errors.current_s_and_s_total}
+            invalidText={errors.current_s_and_s_total}
+            helperText="Required"
+            onChange={(_e, data) => {
+              if (data.value === '' || data.value === undefined) {
+                updateField('current_s_and_s_total', '');
+                return;
+              }
+              const v = typeof data.value === 'string' ? parseFloat(data.value) : data.value;
+              updateField('current_s_and_s_total', isNaN(v) ? '' : v);
+            }}
+          />
+          <TextInput
+            id="renewal_date"
+            labelText="Support due *"
+            value={form.renewal_date}
+            placeholder="e.g., August 2026"
+            invalid={!!errors.renewal_date}
+            invalidText={errors.renewal_date}
+            helperText="Required"
+            onChange={(e) => updateField('renewal_date', e.target.value)}
+          />
+        </div>
+
+        <TextArea
+          id="trade_up_notes"
+          labelText="Notes (optional)"
+          value={form.trade_up_notes}
+          placeholder="Add deal specifics or notes if needed"
+          helperText="Shown on slide 5 in the Notes column"
+          rows={3}
+          onChange={(e) => updateField('trade_up_notes', e.target.value)}
+        />
+      </Tile>
+
+      {/* ── Default Assumptions / Methodology ── */}
+      <Tile style={{ marginBottom: '0.75rem' }}>
+        <div className="bva-section-title">Default Assumptions & Methodology</div>
+        <div className="bva-section-explain">
+          The benefit defaults below are anchored to published industry research. They're
+          deliberately conservative versus the cited sources — override any field with
+          customer-specific data when you have it.
+        </div>
+        <div className="bva-assumptions-grid">
+          <div className="bva-assumption-item">
+            <strong>DBA Productivity</strong>
+            <div className="bva-assumption-value">85% of DBA time on ops · 40% reduction</div>
+            <div className="bva-assumption-source">IDC (75% benchmark); Gartner AIOps (25–40%)</div>
+          </div>
+          <div className="bva-assumption-item">
+            <strong>MTTR Reduction</strong>
+            <div className="bva-assumption-value">$75K per incident · 50% MTTR reduction</div>
+            <div className="bva-assumption-source">ITIC ($300K+/hr × ~15 min avg); Forrester TEI (70% / 3 yrs)</div>
+          </div>
+          <div className="bva-assumption-item">
+            <strong>SEV-1 Avoidance</strong>
+            <div className="bva-assumption-value">$500K per critical outage · 50% reduction</div>
+            <div className="bva-assumption-source">Ponemon ($740K avg.); Forrester TEI (50% Yr1)</div>
+          </div>
+          <div className="bva-assumption-item">
+            <strong>Tool Consolidation</strong>
+            <div className="bva-assumption-value">$75K savings per retired monitoring tool</div>
+            <div className="bva-assumption-source">Forrester TEI (~$100K each)</div>
+          </div>
+        </div>
       </Tile>
 
       {/* ── Row 2: DBA Productivity | MTTR Reduction ── */}
       <div className="tile-pair">
         <Tile>
           <div className="bva-section-title">DBA Productivity</div>
+          <div className="bva-section-explain">
+            <strong>DBA</strong> = Database Administrator. Savings come from AI automating routine
+            operations (provisioning, tuning, backups) so DBAs spend their time on higher-value work.
+          </div>
           <div className="form-grid">
             <NumberInput
               id="num_dbas"
@@ -486,7 +717,7 @@ export function BvaForm() {
               min={0}
               step={1}
               onChange={onNum('num_dbas')}
-              helperText="Full-time equivalent DBAs"
+              helperText="Auto-scales with deployment — override with FTE count"
             />
             <NumberInput
               id="dba_annual_pay"
@@ -521,6 +752,10 @@ export function BvaForm() {
         </Tile>
         <Tile>
           <div className="bva-section-title">MTTR Reduction</div>
+          <div className="bva-section-explain">
+            <strong>MTTR</strong> = Mean Time To Resolve — how long it takes to fix a database
+            incident. AI-driven root-cause analysis shortens diagnosis, so each incident costs less.
+          </div>
           <div className="form-grid">
             <NumberInput
               id="incidents_per_year"
@@ -531,7 +766,7 @@ export function BvaForm() {
               onChange={onRequiredNum('incidents_per_year')}
               invalid={!!errors.incidents_per_year}
               invalidText={errors.incidents_per_year}
-              helperText="Customer-specific (ServiceNow / PagerDuty)"
+              helperText="Auto-scales with deployment — replace with ServiceNow / PagerDuty data"
             />
             <NumberInput
               id="cost_per_incident"
@@ -560,6 +795,10 @@ export function BvaForm() {
       <div className="tile-pair">
         <Tile>
           <div className="bva-section-title">SEV-1 Avoidance</div>
+          <div className="bva-section-explain">
+            <strong>SEV-1</strong> = Severity 1, a critical, business-impacting outage. AI catches
+            anomalies early and prevents them from cascading into full outages.
+          </div>
           <div className="form-grid">
             <NumberInput
               id="sev1_per_year"
@@ -570,7 +809,7 @@ export function BvaForm() {
               onChange={onRequiredNum('sev1_per_year')}
               invalid={!!errors.sev1_per_year}
               invalidText={errors.sev1_per_year}
-              helperText="Customer-specific (incident mgmt system)"
+              helperText="Auto-scales with deployment — replace with incident-mgmt data"
             />
             <NumberInput
               id="cost_per_sev1"
@@ -595,6 +834,11 @@ export function BvaForm() {
         </Tile>
         <Tile>
           <div className="bva-section-title">Tool Consolidation & Financial</div>
+          <div className="bva-section-explain">
+            Savings from retiring overlapping monitoring tools once Db2 AI Edition's built-in
+            observability replaces them. The <strong>discount rate</strong> reflects the time value of
+            money and is used to calculate NPV (Net Present Value) and ROI.
+          </div>
           <div className="form-grid">
             <NumberInput
               id="num_tools"
@@ -603,7 +847,7 @@ export function BvaForm() {
               min={0}
               step={1}
               onChange={onNum('num_tools')}
-              helperText="New Relic avg: 4.4 tools/org"
+              helperText="Auto-scales with deployment — New Relic avg: 4.4 tools/org"
             />
             <NumberInput
               id="cost_per_tool"
@@ -662,14 +906,30 @@ export function BvaForm() {
         </div>
       </Tile>
 
-      <div style={{ display: 'flex', justifyContent: 'center', margin: '2rem 0 1rem' }}>
+      {/* ── Footer action bar (mirrors top so user can generate without scrolling up) ── */}
+      <div className="bva-footer-actions">
         <Button
-          kind="ghost"
           size="md"
-          renderIcon={ArrowUp}
-          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          kind="tertiary"
+          renderIcon={Reset}
+          onClick={handleReset}
+          disabled={isGenerating}
         >
-          Back to top (Generate Deck is up there)
+          Reset
+        </Button>
+        <Button
+          size="md"
+          kind="primary"
+          className="bva-generate-btn"
+          renderIcon={isGenerating ? undefined : Download}
+          onClick={handleGenerateClick}
+          disabled={isGenerating}
+        >
+          {isGenerating ? (
+            <InlineLoading description="Generating..." />
+          ) : (
+            'Generate Deck'
+          )}
         </Button>
       </div>
     </div>

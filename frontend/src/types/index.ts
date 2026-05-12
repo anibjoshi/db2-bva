@@ -2,6 +2,8 @@ export interface TradeUpCatalogEntry {
   source: string;
   target: string;
   pn: string;
+  ratio: number;        // destination units per source unit (e.g. 1/70 for PVU→VPC)
+  license_cost: number; // $ per destination unit (one-time, Year 1)
 }
 
 export interface TradeUpItem {
